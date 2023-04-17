@@ -1,0 +1,235 @@
+---
+title: "Examining expression of immune genes in devils with DFTD"
+author: "Mark Ziemann"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+theme: cosmo
+---
+
+Source codes: TBA
+
+## Background
+
+We have designed a target enrichment panel to examine gene expression of immune genes.
+This is so we can inexpensively profile immune gene expression in devils.
+We will be looking at a lot of different variables such as dftd-free vs affected, DFTD1 vs DFTD2, etc.
+
+The main comparisons are:
+
+-Wild vs Captive devils
+
+-Healthy vs DFTD infected devils
+
+-DFT1 and DFT2 devils
+
+I have their sex/age/seasons categories there as well if we decide to go with more detail analysis
+in the future, but I think just stick with these three for now.
+Some devils are a part of the Captive control and Wild control groups .
+There are a couple samples that won't go into the analysis that I made note of. Meliza and Simba.
+
+```{r,pkg}
+
+suppressPackageStartupMessages({
+    library("reshape2")
+    library("gplots")
+    library("DESeq2")
+    library("mitch")
+    library("limma")
+})
+
+```
+
+Functions.
+
+```{r,func}
+
+maplot <- function(de,contrast_name) {
+  sig <-subset(de, padj < 0.05 )
+  up <-rownames(subset(de, padj < 0.05 & log2FoldChange > 0))
+  dn <-rownames(subset(de, padj < 0.05 & log2FoldChange < 0))
+  GENESUP <- length(up)
+  GENESDN <- length(dn)
+  DET=nrow(de)
+  SUBHEADER = paste(GENESUP, "up, ", GENESDN, "down", DET, "detected")
+  ns <-subset(de, padj > 0.05 )
+  plot(log2(de$baseMean),de$log2FoldChange, 
+       xlab="log2 basemean", ylab="log2 foldchange",
+       pch=19, cex=1, col="dark gray",
+       main=contrast_name, cex.main=0.7)
+  points(log2(sig$baseMean),sig$log2FoldChange,
+         pch=19, cex=1, col="red")
+  mtext(SUBHEADER,cex = 0.7)
+  grid()
+}
+
+make_volcano <- function(de,name) {
+    sig <- subset(de,padj<0.05)
+    N_SIG=nrow(sig)
+    N_UP=nrow(subset(sig,log2FoldChange>0))
+    N_DN=nrow(subset(sig,log2FoldChange<0))
+    DET=nrow(de)
+    HEADER=paste(N_SIG,"@5%FDR,", N_UP, "up", N_DN, "dn", DET, "detected")
+    plot(de$log2FoldChange,-log10(de$padj),cex=1,pch=19,col="darkgray",
+        main=name, xlab="log2 FC", ylab="-log10 pval", xlim=c(-6,6))
+    mtext(HEADER)
+    grid()
+    points(sig$log2FoldChange,-log10(sig$padj),cex=1,pch=19,col="red")
+}
+
+```
+
+
+## Load data
+
+Here we load the data in from the aligner.
+
+```{r,import}
+
+tmp <- read.table("3col.tsv")
+x <- as.data.frame(acast(tmp, V2~V1, value.var="V3"))
+x$gene <- sapply(strsplit(rownames(x),"\\."),"[[",1)
+xx <- aggregate(. ~ gene, x, sum)
+rownames(xx) <- xx$gene
+xx$gene = NULL
+dim(xx)
+
+```
+
+Collapse transcript expression to gene level.
+
+```{r,tx2g}
+
+tx2g <- read.table("ref/Sarcophilus_harrisii.mSarHar1.11.cdna+ncrna.all.tx2gene.tsv")
+xxg <- merge(tx2g,xx,by.x="V1",by.y=0)
+xxg$V1=NULL
+
+xxa <- aggregate(. ~ V2, xxg, sum)
+dim(xxa)
+
+```
+
+Now attempt to attach the gene symbol.
+Also remove any genes with fewer than 10 reads per sample on average.
+
+```{r,id2sym}
+
+id2sym <- read.table("ref/Sarcophilus_harrisii.mSarHar1.11.cdna+ncrna.all.geneid2symbol.tsv")
+
+xxa$gene_symbol <- id2sym[match( xxa$V2, id2sym$V1 ),2]
+rownames(xxa) <- paste(xxa$V2,xxa$gene_symbol)
+xxa$V2 = NULL
+xxa$gene_symbol = NULL
+
+```
+
+Determine on target reads.
+Load gene list and count reads.
+There are many gene names from Nick that are not in the database.
+I have messaged him to prvide the Ensembl IDs so I can match them.
+
+```{r,intarg1}
+
+gl <-readLines("gene_list.tsv")
+glist <- sapply(strsplit(gl,"\t"),"[[",1)
+glist[which(!glist %in% id2sym$V2)]
+
+```
+
+## Remove poor samples
+
+Samples with <1M reads should be omitted.
+Will also round values to integers.
+
+```{r,qc1}
+
+colSums(xxa)
+xxa <- xxa[,colSums(xxa)>1e6]
+xxa <- round(xxa)
+
+```
+
+## Sample sheet
+
+
+```{r,ss1}
+
+ss <- read.table("samplesheet.tsv",sep="\t",header=TRUE)
+
+```
+
+## MDS
+
+
+```{r,plotmds1}
+
+plotMDS(xxa)
+
+```
+
+## DESeq2
+
+Run a differential analysis.
+Wild vs captive.
+
+```{r,de1}
+
+ss1 <- ss[which(grepl("Wild",ss$Category) + grepl("Captive",ss$Category)>0),]
+ss1 <- ss1[ss1$Sample %in% colnames(xxa),]
+dim(ss1)
+xxa1 <- xxa[,which(colnames(xxa) %in% ss1$Sample)]
+dim(xxa1)
+xxa1 <- xxa1[which(rowMeans(xxa1)>10),]
+dim(xxa1)
+
+col <- as.character(as.numeric(grepl("Cap",ss1$Category)))
+col <- gsub("0","lightgreen",col)
+col <- gsub("1","lightblue",col)
+
+mds<-plotMDS(xxf1,pch=19,cex=3,col=col,main="MDS plot: wild and captive devils")
+mtext("wild=green, captive=blue")
+text(mds,labels=colnames(xxf1),cex=0.7)
+
+# coding captive
+ss1$captive <- grepl("Cap",ss1$Category)
+
+dds <- DESeqDataSetFromMatrix(countData = xxa1 , colData = ss1, design = ~ captive )
+res <- DESeq(dds)
+z<- results(res)
+vsd <- vst(dds, blind=FALSE,nsub=nrow(xxa1)-50)
+zz<-cbind(as.data.frame(z),assay(vsd))
+dge<-as.data.frame(zz[order(zz$pvalue),])
+dge1 <- dge
+sig <- subset(dge,padj<0.05)
+sig1_up <- rownames(subset(sig,log2FoldChange>0))
+sig1_dn <- rownames(subset(sig,log2FoldChange<0))
+length(sig1_up)
+length(sig1_dn)
+
+maplot(dge1,"wild vs captive devils")
+
+make_volcano(dge1,"wild vs captive devils")
+
+sig[,1:6] %>%
+  kbl(caption="Comparison of wild vs captive devils") %>%
+  kable_paper("hover", full_width = F)
+
+write.table(dge,file="dge1.tsv",sep="\t")
+
+mx <- sig[,7:ncol(sig)]
+mx <- head(mx,30)
+heatmap.2(as.matrix(mx),trace="none",scale="row",ColSideColors=col,mar=c(5,12))
+
+```
+
+## Session information
+
+For reproducibility.
+
+```{r,session}
+
+sessionInfo()
+
+
+```
