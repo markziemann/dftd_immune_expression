@@ -1,0 +1,223 @@
+---
+title: "Examining expression of immune genes in devils with DFTD"
+author: "Nick Macdonald & Mark Ziemann"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    fig_width: 5
+    fig_height: 5
+theme: cosmo
+---
+
+Source codes: TBA
+
+## Background
+
+We have designed a target enrichment panel to examine gene expression of immune genes.
+This is so we can inexpensively profile immune gene expression in devils.
+We will be looking at a lot of different variables such as dftd-free vs affected, DFTD1 vs DFTD2, etc.
+
+The main comparisons are:
+
+-Wild vs Captive devils
+
+-Healthy vs DFTD infected devils
+
+-DFT1 and DFT2 devils
+
+I have their sex/age/seasons categories there as well if we decide to go with more detail analysis
+in the future, but I think just stick with these three for now.
+Some devils are a part of the Captive control and Wild control groups .
+There are a couple samples that won't go into the analysis that I made note of. Meliza and Simba.
+
+```{r,pkg}
+
+suppressPackageStartupMessages({
+    library("reshape2")
+    library("gplots")
+    library("DESeq2")
+    library("mitch")
+    library("limma")
+    library("kableExtra")
+    library("dplyr")
+})
+
+```
+
+Functions.
+
+```{r,func}
+
+maplot <- function(de,contrast_name) {
+  sig <-subset(de, padj < 0.05 )
+  up <-rownames(subset(de, padj < 0.05 & log2FoldChange > 0))
+  dn <-rownames(subset(de, padj < 0.05 & log2FoldChange < 0))
+  GENESUP <- length(up)
+  GENESDN <- length(dn)
+  DET=nrow(de)
+  SUBHEADER = paste(GENESUP, "up, ", GENESDN, "down", DET, "detected")
+  ns <-subset(de, padj > 0.05 )
+  plot(log2(de$baseMean),de$log2FoldChange, 
+       xlab="log2 basemean", ylab="log2 foldchange",
+       pch=19, cex=1, col="dark gray",
+       main=contrast_name, cex.main=0.7)
+  points(log2(sig$baseMean),sig$log2FoldChange,
+         pch=19, cex=1, col="red")
+  mtext(SUBHEADER,cex = 0.7)
+  grid()
+}
+
+make_volcano <- function(de,name) {
+    sig <- subset(de,padj<0.05)
+    N_SIG=nrow(sig)
+    N_UP=nrow(subset(sig,log2FoldChange>0))
+    N_DN=nrow(subset(sig,log2FoldChange<0))
+    DET=nrow(de)
+    HEADER=paste(N_SIG,"@5%FDR,", N_UP, "up", N_DN, "dn", DET, "detected")
+    plot(de$log2FoldChange,-log10(de$padj),cex=1,pch=19,col="darkgray",
+        main=name, xlab="log2 FC", ylab="-log10 pval", xlim=c(-6,6))
+    mtext(HEADER)
+    grid()
+    points(sig$log2FoldChange,-log10(sig$padj),cex=1,pch=19,col="red")
+}
+
+```
+
+
+## Load data
+
+Here we load the data in from the aligner.
+
+```{r,import}
+
+tmp <- read.table("3col.tsv.gz")
+x <- as.data.frame(acast(tmp, V2~V1, value.var="V3"))
+colnames(x) <- gsub("fastq/","",colnames(x))
+dim(x)
+
+```
+
+
+## Remove poor samples
+
+Samples with <1M reads should be omitted.
+Will also round values to integers.
+
+```{r,qc1}
+
+cs <- colSums(x)
+cs <- cs[order(cs)]
+
+barplot(cs,ylim=c(1e2,2e7),log="y",main="All samples")
+barplot(head(cs),log="y",main="Samples with low reads")
+
+abline(h=1e6,col="red",lty=2)
+x <- x[,colSums(x)>1e6]
+x <- round(x)
+
+```
+
+## Identify poorly represented genes
+
+```{r,geneqc}
+
+rc <- rowMeans(x)
+rc <- rc[order(rc)]
+barplot(rc+1,log="y")
+hist(log(rc+1))
+
+round(rc[which(rc<10)],digits=1)
+
+```
+
+A lot of the shorter genes (cytokines) had lower expression.
+
+
+## Sample sheet
+
+
+```{r,ss1}
+
+ss <- read.table("samplesheet.tsv",sep="\t",header=TRUE)
+
+```
+
+## MDS
+
+
+```{r,plotmds1}
+
+plotMDS(x)
+
+```
+
+## DESeq2
+
+Run a differential analysis.
+Wild vs captive.
+
+```{r,de1}
+
+ss1 <- ss[which(grepl("Wild",ss$Category) + grepl("Captive",ss$Category)>0),]
+ss1 <- ss1[ss1$Sample %in% colnames(x),]
+dim(ss1)
+x1 <- x[,which(colnames(x) %in% ss1$Sample)]
+dim(x1)
+x1 <- x1[which(rowMeans(x1)>10),]
+dim(x1)
+
+col <- as.character(as.numeric(grepl("Cap",ss1$Category)))
+col <- gsub("0","lightgreen",col)
+col <- gsub("1","lightblue",col)
+
+mds<-plotMDS(x1,pch=19,cex=3,col=col,main="MDS plot: wild and captive devils")
+mtext("wild=green, captive=blue")
+text(mds,labels=colnames(x1),cex=0.7)
+
+# coding captive
+ss1$captive <- grepl("Cap",ss1$Category)
+
+dds <- DESeqDataSetFromMatrix(countData = x1 , colData = ss1, design = ~ captive )
+res <- DESeq(dds)
+z<- results(res)
+vsd <- vst(dds, blind=FALSE,nsub=nrow(x1)-50)
+zz<-cbind(as.data.frame(z),assay(vsd))
+dge<-as.data.frame(zz[order(zz$pvalue),])
+dge1 <- dge
+sig <- subset(dge,padj<0.05)
+sig1_up <- rownames(subset(sig,log2FoldChange>0))
+sig1_dn <- rownames(subset(sig,log2FoldChange<0))
+length(sig1_up)
+length(sig1_dn)
+
+maplot(dge1,"wild vs captive devils")
+
+make_volcano(dge1,"wild vs captive devils")
+
+sig[1:50,1:6] %>%
+  kbl(caption="Comparison of wild vs captive devils") %>%
+  kable_paper("hover", full_width = F)
+
+write.table(dge,file="dge1.tsv",sep="\t")
+
+mx <- sig[,7:ncol(sig)]
+mx <- head(mx,30)
+colfunc <- colorRampPalette(c("blue", "white", "red"))
+heatmap.2(as.matrix(mx),trace="none",scale="row",
+  col=colfunc(25),ColSideColors=col,mar=c(5,12))
+
+```
+
+## Session information
+
+For reproducibility.
+
+```{r,session}
+
+sessionInfo()
+
+
+```
